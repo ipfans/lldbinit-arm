@@ -9,49 +9,17 @@
     in $HOME/.lldbinit add:
     command script import lldbinit
 
-    Apple's default lldb comes with annoying disassembly eg:
-    -> 0x1d70:  push   EBP
-           0x1d71:  mov    EBP, ESP
-           0x1d73:  push   EDI
-           0x1d74:  push   ESI
-           0x1d75:  sub    ESP, 80
-
-    with lldb from lldb svn:
-
-    -> 0x1d70:  push   ebp
-           0x1d71:  mov    ebp, esp
-           0x1d73:  push   edi
-           0x1d74:  push   esi
-           0x1d75:  sub    esp, 0x50
-
-    Somewhere nicer, to compile lldb from svn we need to do:
-    svn co http://llvm.org/svn/llvm-project/lldb/trunk lldb
-    xcodebuild -configuration Release
-
-    From latest update of lldb there is change in handling IO, so to use
-    this script and be compatible with Apple's lldb you need to checkout
-    revision r200253 and you can do that by typing:
-    svn co -r r200253 http://llvm.org/svn/llvm-project/lldb/trunk
-
 Commands which are implemented:
-    stepo       - step over some instructions (call/movs/stos/cmps/loop)
-    dd          - dump hex data at certain address (keep compatibility with .gdbinit)
-              this shoud be db command
+    stepo       - step over some instructions(call/movs/stos/cmps/loop)
+    dd          - dump hex data at certain address(compatibility with .gdbinit)
+                  this shoud be db command
     ctx/context - dump registers and assembly
-    lb      - load breakpoints from file and apply them (currently only func names are applied)
-    u       - dump instructions at certain address (SoftICE like u command style)
-    ddword  - dump data as dword
-    dq      - dump data as qword
-    dw      - dump data as word
-
-    hook-stop can be added only when target exists, before it's not possible (maybe in later versions
-    of lldb it is or will be possible but...). Trick to get arround this is to create thread which will
-    try to add hook-stop, and will continue doing so until it's done. This could cause some raise conditions
-    as I don't know if this is thread safe, however in my testing (and using it) it worked quite well so
-    I keep using it instead of adding extra command "init" or such when target is created...
-
-    Currently registers dump are done for i386/x86_64 . ARM will be added when I find need for it, atm it's
-    not required... (or when somebody else adds it)...
+    lb          - load breakpoints from file and apply(only func names)
+    u           - dump instructions at certain address(SoftICE u command style)
+    ddword      - dump data as dword
+    dq          - dump data as qword
+    dw          - dump data as word
+    iphone      - connect to debugserver running on iPhone
 
 '''
 
@@ -61,12 +29,12 @@ if __name__ == "__main__":
 try:
     import lldb
 except:
-    pass
+    raise ImportError
+
 import thread
 import time
 import struct
 
-# i386 registers
 old_eax = 0
 old_ecx = 0
 old_edx = 0
@@ -84,7 +52,6 @@ old_gs = 0
 old_ss = 0
 old_es = 0
 
-# x86_64 registers
 old_rax = 0
 old_rcx = 0
 old_rdx = 0
@@ -104,22 +71,23 @@ old_r15 = 0
 old_rflags = 0
 old_rip = 0
 
-# ARM32 registers
-oldr0 = 0
-oldr1 = 0
-oldr2 = 0
-oldr3 = 0
-oldr4 = 0
-oldr5 = 0
-oldr6 = 0
-oldr7 = 0
-oldr8 = 0
-oldr9 = 0
-oldr10 = 0
-oldr11 = 0
-oldr12 = 0
-oldsp = 0
-oldlr = 0
+old_arm_r0 = 0
+old_arm_r1 = 0
+old_arm_r2 = 0
+old_arm_r3 = 0
+old_arm_r4 = 0
+old_arm_r5 = 0
+old_arm_r6 = 0
+old_arm_r7 = 0
+old_arm_r8 = 0
+old_arm_r9 = 0
+old_arm_r10 = 0
+old_arm_r11 = 0
+old_arm_r12 = 0
+old_arm_sp = 0
+old_arm_lr = 0
+old_arm_pc = 0
+old_arm_cpsr = 0
 
 BLACK = 0
 RED = 1
@@ -136,22 +104,30 @@ COLOR_REGVAL_MODIFIED = RED
 COLOR_SEPARATOR = BLUE
 COLOR_CPUFLAGS = RED
 COLOR_HIGHLIGHT_LINE = CYAN
-#stop-disassembly-count
-#stop-disassembly-display
-#frame-format
-#thread-format
-#prompt
+
+arm_type = "thumbv7-apple-ios"
 
 GlobalListOutput = []
 
 hook_stop_added = 0
 
+# For debug
+Isdprint = True
+
+
+def dprint(msg):
+    global Isdprint
+    global GlobalListOutput
+    if Isdprint is True:
+        GlobalListOutput.append(msg)
+
 
 def wait_for_hook_stop():
     while True:
+        dprint("Waiting...")
         res = lldb.SBCommandReturnObject()
         handleCmd = lldb.debugger.GetCommandInterpreter().HandleCommand
-        handleCmd("target stop-hook add -o \"HandleHookStopOnTarget\"", res)
+        handleCmd("target stop-hook add -o \"handleHookStop\"", res)
         if res.Succeeded() is True:
             return
         time.sleep(0.05)
@@ -159,57 +135,55 @@ def wait_for_hook_stop():
 
 def __lldb_init_module(debugger, internal_dict):
     '''
-        we can execute commands using debugger.HandleCommand which makes all outptu to default
-        lldb console. With GetCommandinterpreter().HandleCommand() we can consume all output
-        with SBCommandReturnObject and parse data before we send it to output (eg. modify it);
+        we can execute commands using debugger.HandleCommand which makes all
+        outptut to default lldb console. With GetCommandinterpreter().
+        HandleCommand() we can consume all output with SBCommandReturnObject
+        and parse data before we send it to output (eg. modify it)
     '''
     global hook_stop_added
 
     '''
-        If I'm running from $HOME where .lldbinit is located, seems like lldb will load
-        .lldbinit 2 times, thus this dirty hack is here to prevent doulbe loading...
+        If I'm running from $HOME where .lldbinit is located, seems like lldb
+        will load.lldbinit 2 times, thus this dirty hack is here to prevent
+        doulbe loading...
         if somebody knows better way, would be great to know :)
     '''
-    var = lldb.debugger.GetInternalVariableValue("stop-disassembly-count", lldb.debugger.GetInstanceName())
+    dbg = lldb.debugger
+    instanceName = dbg.GetInstanceName()
+    var = dbg.GetInternalVariableValue("stop-disassembly-count", instanceName)
     if var.IsValid():
         var = var.GetStringAtIndex(0)
         if var == "0":
+            dprint("reloaded.")
             return
     res = lldb.SBCommandReturnObject()
-    handleCmd = lldb.debugger.GetCommandInterpreter().HandleCommand
+    handleCmd = dbg.GetCommandInterpreter().HandleCommand
     handleCmd("settings set target.x86-disassembly-flavor intel", res)
     handleCmd("command script add -f lldbinit.stepo stepo", res)
-    handleCmd("command script add -f lldbinit.HandleHookStopOnTarget HandleHookStopOnTarget", res)
+    handleCmd("command script add -f lldbinit.handleHookStop handleHookStop", res)
     handleCmd("command script add -f lldbinit.dd dd", res)
     handleCmd("command script add -f lldbinit.si si", res)
-    handleCmd("command script add -f lldbinit.c  c", res)
-    handleCmd("command script add -f lldbinit.r  r", res)
-    handleCmd("command script add -f lldbinit.r  run", res)
-    handleCmd("command script add -f lldbinit.HandleHookStopOnTarget ctx", res)
-    handleCmd("command script add -f lldbinit.HandleHookStopOnTarget context", res)
+    handleCmd("command script add -f lldbinit.c c", res)
+    handleCmd("command script add -f lldbinit.r r", res)
+    handleCmd("command script add -f lldbinit.r run", res)
+    handleCmd("command script add -f lldbinit.handleHookStop ctx", res)
+    handleCmd("command script add -f lldbinit.handleHookStop context", res)
     handleCmd("command script add -f lldbinit.DumpInstructions u", res)
     handleCmd("command script add -f lldbinit.LoadBreakPoints lb", res)
     handleCmd("command script add -f lldbinit.dq dq", res)
     handleCmd("command script add -f lldbinit.ddword ddword", res)
     handleCmd("command script add -f lldbinit.dw dw", res)
-    # handleCmd("command script add -f lldbinit.init init", res)
-    # handleCmd("target stop-hook add -o \"HandleHookStopOnTarget\"", res)
-    # if res.Succeeded() == True:
-    #     hook_stop_added = 1
-    # else:
-    #     print("[*] hook-stop not initialized...")
-    #     print("[*] type init once target is loaded...")
-    # debugger.HandleCommand("target stop-hook add -o \"HandleHookStopOnTarget\"")
+    handleCmd("command script add -f lldbinit.IphoneConnect iphone", res)
+
     '''
-        target stop-hook can be added only when target is loaded, thus I create thread
-        to execute this command until it returns success... dunno if this is ok, or thread
-        safe, but I hate to add extra command "init" or such to install this hook...
+        target stop-hook can be added only when target is loaded, thus I create
+        thread to execute this command until it returns success... dunno if
+        this is ok, or thread safe, but I hate to add extra command "init" or
+        such to install this hook...
     '''
     thread.start_new_thread(wait_for_hook_stop, ())
 
     handleCmd("settings set prompt \"\033[31m(lldb) \033[0m\"", res)
-    # handleCmd("settings set frame-format \"\n\"", res)
-    # handleCmd("settings set thread-format \"\"", res)
     handleCmd("settings set stop-disassembly-count 0", res)
     return
 
@@ -219,12 +193,14 @@ def get_arch():
 
 
 def get_frame():
-    return lldb.debugger.GetSelectedTarget().process.selected_thread.GetSelectedFrame()
+    target = lldb.debugger.GetSelectedTarget()
+    return target.process.selected_thread.GetSelectedFrame()
 
 
 def is_i386():
     arch = get_arch()
     if arch[0:1] == "i":
+        dprint("i386 platform")
         return True
     return False
 
@@ -232,13 +208,15 @@ def is_i386():
 def is_x64():
     arch = get_arch()
     if arch == "x86_64":
+        dprint("x86_64 platform")
         return True
     return False
 
 
-def is_arm32():
+def is_arm():
     arch = get_arch()
-    if arch == "arm":
+    if "arm" in arch:
+        dprint("ARM platform")
         return True
     return False
 
@@ -277,11 +255,7 @@ def color(x):
 
 
 def output(x):
-    #sys.stdout.flush()
-    #sys.stdout.write(x)
-    #sys.stdout.flush()
     global GlobalListOutput
-    #print("Adding to the list " + x)
     GlobalListOutput.append(x)
 
 
@@ -294,8 +268,7 @@ def get_register(reg_name):
 
 
 def get_registers(kind):
-    """
-    Returns the registers given the frame and the kind of registers desired.
+    """Returns the registers given the frame and the kind of registers desired.
 
     Returns None if there's no such kind.
     """
@@ -401,9 +374,6 @@ def reg64():
     cs = int(get_register("cs"), 16)
     gs = int(get_register("gs"), 16)
     fs = int(get_register("fs"), 16)
-    #not needed as x64 doesn't use them...
-    #ds = int(get_register("ds"), 16)
-    #ss = int(get_register("ss"), 16)
 
     color(COLOR_REGNAME)
     output("  RAX: ")
@@ -781,245 +751,347 @@ def reg32():
     output("\n")
 
 
-def regARM32():
-    global oldr0
-    global oldr1
-    global oldr2
-    global oldr3
-    global oldr4
-    global oldr5
-    global oldr6
-    global oldr7
-    global oldr8
-    global oldr9
-    global oldr10
-    global oldr11
-    global oldr12
-    global oldsp
-    global oldlr
+def dump_cpsr(cpsr):
+    if (cpsr >> 31) & 1:
+        output("N ")
+    else:
+        output("n ")
+
+    if (cpsr >> 30) & 1:
+        output("Z ")
+    else:
+        output("z ")
+
+    if (cpsr >> 29) & 1:
+        output("C ")
+    else:
+        output("c ")
+
+    if (cpsr >> 28) & 1:
+        output("V ")
+    else:
+        output("v ")
+
+    if (cpsr >> 27) & 1:
+        output("Q ")
+    else:
+        output("q ")
+
+    if (cpsr >> 24) & 1:
+        output("J ")
+    else:
+        output("j ")
+
+    if (cpsr >> 9) & 1:
+        output("E ")
+    else:
+        output("e ")
+    if (cpsr >> 8) & 1:
+        output("A ")
+    else:
+        output("a ")
+    if (cpsr >> 7) & 1:
+        output("I ")
+    else:
+        output("i ")
+    if (cpsr >> 6) & 1:
+        output("F ")
+    else:
+        output("f ")
+    if (cpsr >> 5) & 1:
+        output("T")
+    else:
+        output("t")
+
+
+def regarm():
+    global old_arm_r0
+    global old_arm_r1
+    global old_arm_r2
+    global old_arm_r3
+    global old_arm_r4
+    global old_arm_r5
+    global old_arm_r6
+    global old_arm_r7
+    global old_arm_r8
+    global old_arm_r9
+    global old_arm_r10
+    global old_arm_r11
+    global old_arm_r12
+    global old_arm_sp
+    global old_arm_lr
+    global old_arm_pc
+    global old_arm_cpsr
 
     color(COLOR_REGNAME)
-    output("  R0: ")
+    output("  R0:  ")
     r0 = int(get_register("r0"), 16)
-    if r0 == oldr0:
+    if r0 == old_arm_r0:
         color(COLOR_REGVAL)
     else:
         color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r0))
-    oldr0 = r0
+    output("0x%.08X" % (r0))
+    old_arm_r0 = r0
 
     color(COLOR_REGNAME)
-    output("  R1: ")
+    output("  R1:  ")
     r1 = int(get_register("r1"), 16)
-    if r1 == oldr1:
+    if r1 == old_arm_r1:
         color(COLOR_REGVAL)
     else:
         color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r1))
-    oldr1 = r1
+    output("0x%.08X" % (r1))
+    old_arm_r1 = r1
 
     color(COLOR_REGNAME)
-    output("  R2: ")
+    output("  R2:  ")
     r2 = int(get_register("r2"), 16)
-    if r2 == oldr2:
+    if r2 == old_arm_r2:
         color(COLOR_REGVAL)
     else:
         color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r2))
-    oldr2 = r2
+    output("0x%.08X" % (r2))
+    old_arm_r2 = r2
 
     color(COLOR_REGNAME)
-    output("  R3: ")
+    output("  R3:  ")
     r3 = int(get_register("r3"), 16)
-    if r3 == oldr3:
+    if r3 == old_arm_r3:
         color(COLOR_REGVAL)
     else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r3))
-    oldr3 = r3
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (r3))
+    old_arm_r3 = r3
+
+    output(" ")
+    color_bold()
+    color_underline()
+    color(COLOR_CPUFLAGS)
+    cpsr = int(get_register("cpsr"), 16)
+    dump_cpsr(cpsr)
+    color_reset()
+
+    output("\n")
 
     color(COLOR_REGNAME)
-    output("  R4: ")
+    output("  R4:  ")
     r4 = int(get_register("r4"), 16)
-    if r4 == oldr4:
-        color(COLOR_REGVAL)
+    if r4 == old_arm_r4:
+            color(COLOR_REGVAL)
     else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r4))
-    oldr4 = r4
-
-    output("  ")
-    output("\n")
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (r4))
+    old_arm_r4 = r4
 
     color(COLOR_REGNAME)
-    output("  R5: ")
+    output("  R5:  ")
     r5 = int(get_register("r5"), 16)
-    if r5 == oldr5:
-        color(COLOR_REGVAL)
+    if r5 == old_arm_r5:
+            color(COLOR_REGVAL)
     else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r5))
-    oldr5 = r5
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (r5))
+    old_arm_r5 = r5
 
     color(COLOR_REGNAME)
-    output("  R6: ")
+    output("  R6:  ")
     r6 = int(get_register("r6"), 16)
-    if r6 == oldr6:
-        color(COLOR_REGVAL)
+    if r6 == old_arm_r6:
+            color(COLOR_REGVAL)
     else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r6))
-    oldr6 = r6
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (r6))
+    old_arm_r6 = r6
 
     color(COLOR_REGNAME)
-    output("  R7: ")
+    output("  R7:  ")
     r7 = int(get_register("r7"), 16)
-    if r7 == oldr7:
-        color(COLOR_REGVAL)
+    if r7 == old_arm_r7:
+            color(COLOR_REGVAL)
     else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r7))
-    oldr7 = r7
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (r7))
+    old_arm_r7 = r7
 
-    color(COLOR_REGNAME)
-    output("  R8: ")
-    r8 = int(get_register("r8"), 16)
-    if r8 == oldr8:
-        color(COLOR_REGVAL)
-    else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r8))
-    oldr8 = r8
-
-    color(COLOR_REGNAME)
-    output("  R9: ")
-    r9 = int(get_register("r9"), 16)
-    if r9 == oldr9:
-        color(COLOR_REGVAL)
-    else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r9))
-    oldr9 = r9
-
-    output("  ")
     output("\n")
+
+    color(COLOR_REGNAME)
+    output("  R8:  ")
+    r8 = int(get_register("r8"), 16)
+    if r8 == old_arm_r8:
+            color(COLOR_REGVAL)
+    else:
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (r8))
+    old_arm_r8 = r8
+
+    color(COLOR_REGNAME)
+    output("  R9:  ")
+    r9 = int(get_register("r9"), 16)
+    if r9 == old_arm_r9:
+            color(COLOR_REGVAL)
+    else:
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (r9))
+    old_arm_r9 = r9
 
     color(COLOR_REGNAME)
     output("  R10: ")
     r10 = int(get_register("r10"), 16)
-    if r10 == oldr10:
-        color(COLOR_REGVAL)
+    if r10 == old_arm_r10:
+            color(COLOR_REGVAL)
     else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r10))
-    oldr10 = r10
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (r10))
+    old_arm_r10 = r10
 
     color(COLOR_REGNAME)
     output("  R11: ")
     r11 = int(get_register("r11"), 16)
-    if r11 == oldr11:
-        color(COLOR_REGVAL)
+    if r11 == old_arm_r11:
+            color(COLOR_REGVAL)
     else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r11))
-    oldr11 = r11
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (r11))
+    old_arm_r11 = r11
+
+    output("\n")
 
     color(COLOR_REGNAME)
     output("  R12: ")
     r12 = int(get_register("r12"), 16)
-    if r12 == oldr12:
-        color(COLOR_REGVAL)
+    if r12 == old_arm_r12:
+            color(COLOR_REGVAL)
     else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (r12))
-    oldr12 = r12
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (r12))
+    old_arm_r12 = r12
 
     color(COLOR_REGNAME)
-    output("  SP: ")
+    output("  SP:  ")
     sp = int(get_register("sp"), 16)
-    if sp == oldsp:
-        color(COLOR_REGVAL)
+    if sp == old_arm_sp:
+            color(COLOR_REGVAL)
     else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (sp))
-    oldsp = sp
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (sp))
+    old_arm_sp = sp
 
     color(COLOR_REGNAME)
-    output("  LR: ")
+    output("  LR:  ")
     lr = int(get_register("lr"), 16)
-    if lr == oldlr:
-        color(COLOR_REGVAL)
+    if lr == old_arm_lr:
+            color(COLOR_REGVAL)
     else:
-        color(COLOR_REGVAL_MODIFIED)
-    output("%.04X" % (lr))
-    oldlr = lr
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (lr))
+    old_arm_lr = lr
+
+    color(COLOR_REGNAME)
+    output("  PC:  ")
+    pc = int(get_register("pc"), 16)
+    if pc == old_arm_pc:
+            color(COLOR_REGVAL)
+    else:
+            color(COLOR_REGVAL_MODIFIED)
+    output("0x%.08X" % (pc))
+    old_arm_pc = pc
+    output("\n")
 
 
-def print_registers():
+def dprint_registers():
     if is_i386():
         reg32()
     elif is_x64():
         reg64()
-    elif is_arm32():
-        regARM32()
+    elif is_arm():
+        regarm()
 
 
 def get_GPRs():
-    """
-    Returns the general purpose registers of the frame as an SBValue.
+    """Returns the general purpose registers of the frame as an SBValue.
 
     The returned SBValue object is iterable.  An example:
         ...
         from lldbutil import get_GPRs
         regs = get_GPRs(frame)
         for reg in regs:
-            print "%s => %s" % (reg.GetName(), reg.GetValue())
+            dprint "%s => %s" % (reg.GetName(), reg.GetValue())
         ...
     """
     return get_registers("general purpose")
 
 
-def HandleHookStopOnTarget(debugger, command, result, dict):
+def handleHookStop(debugger, command, result, dict):
+    '''
+        Dump current registers and instruction. It will dump when stop at
+        breakpoint. Dump by manual with ctx or context command.
+    '''
     global GlobalListOutput
+    global arm_type
 
     GlobalListOutput = []
 
     arch = get_arch()
-    if not is_i386() and not is_x64() and not is_arm32():
-        #this is for ARM64 probably in the future... when I will need it...
-        print("Unknown architecture : " + arch)
+    if not is_i386() and not is_x64() and not is_arm():
+        #this is for ARM probably in the future... when I will need it...
+        dprint("Unknown architecture : " + arch)
         return
 
     output("\n")
     color(COLOR_SEPARATOR)
-    if is_i386() or is_arm32():
-        output("---------------------------------------------------------------------------------")
+    if is_i386() or is_arm():
+            output(
+                "----------------------------------------------------------" +
+                "-----------------------")
     elif is_x64():
-        output("-----------------------------------------------------------------------------------------------------------------------")
+            output(
+                "----------------------------------------------------------" +
+                "----------------------------------------------------------" +
+                "---")
 
     color_bold()
     output("[regs]\n")
     color_reset()
-    print_registers()
+    dprint_registers()
 
     color(COLOR_SEPARATOR)
-    if is_i386() or is_arm32():
-            output("---------------------------------------------------------------------------------")
+    if is_i386() or is_arm():
+            output(
+                "---------------------------------------------------------" +
+                "------------------------")
     elif is_x64():
-            output("-----------------------------------------------------------------------------------------------------------------------")
+            output(
+                "---------------------------------------------------------" +
+                "---------------------------------------------------------" +
+                "-----")
     color_bold()
     output("[code]\n")
     color_reset()
 
     if is_i386():
-        pc = get_register("eip")
+            pc = get_register("eip")
     elif is_x64():
-        pc = get_register("rip")
-
+            pc = get_register("rip")
+    elif is_arm():
+        pc = get_register("pc")
     #debugger.HandleCommand("disassemble --start-address=" + pc + " --count=8")
-        res = lldb.SBCommandReturnObject()
-        lldb.debugger.GetCommandInterpreter().HandleCommand("disassemble --start-address=" + pc + " --count=8", res)
-
+    res = lldb.SBCommandReturnObject()
+    if is_arm():
+        cpsr = int(get_register("cpsr"), 16)
+        t = (cpsr >> 5) & 1
+        if t:
+            #it's thumb
+            arm_type = "thumbv7-apple-ios"
+        else:
+            arm_type = "armv7-apple-ios"
+        lldb.debugger.GetCommandInterpreter().HandleCommand(
+            "disassemble -A " + arm_type + " --start-address=" + pc + " -c 8",
+            res)
+    else:
+        lldb.debugger.GetCommandInterpreter().HandleCommand(
+            "disassemble --start-address=" + pc + " -c 8",
+            res)
     data = res.GetOutput()
     #split lines... and mark currently executed code...
     data = data.split("\n")
@@ -1034,23 +1106,33 @@ def HandleHookStopOnTarget(debugger, command, result, dict):
         output("\n")
     #output(res.GetOutput())
     color(COLOR_SEPARATOR)
-    if is_i386() or is_arm32():
-            output("---------------------------------------------------------------------------------------")
+    if is_i386() or is_arm():
+            output(
+                "-------------------------------------------------------" +
+                "--------------------------------")
     elif is_x64():
-            output("-----------------------------------------------------------------------------------------------------------------------------")
+            output(
+                "--------------------------------------------------------" +
+                "--------------------------------------------------------" +
+                "-------------")
     color_reset()
     output("\n")
 
-    #stop reason is just a number, we need StopDescription...
-    #output("Stop reason : " + str(lldb.debugger.GetSelectedTarget().process.selected_thread.GetStopReason()))
-    #output("\n")
-    output("Stop reason : " + str(lldb.debugger.GetSelectedTarget().process.selected_thread.GetStopDescription(100)))
+    proc = lldb.debugger.GetSelectedTarget().process.selected_thread
+    output("Stop reason : " + str(proc.GetStopDescription(100)))
 
     result.PutCString("".join(GlobalListOutput))
     result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
 
 
 def LoadBreakPoints(debugger, command, result, dict):
+    '''
+        load breakpoints from file and apply them (currently only func names
+        are applied)
+
+        Example
+            lb [filename]
+    '''
     global GlobalOutputList
     GlobalOutputList = []
     try:
@@ -1070,51 +1152,91 @@ def LoadBreakPoints(debugger, command, result, dict):
     f.close()
 
 
+'''
+    si, c, r instruction override deault ones to consume their output.
+    For example:
+        si is thread step-in which by default dumps thread and frame info
+        after every step. Consuming output of this instruction allows us
+        to nicely display informations in our hook-stop
+    Same goes for c and r (continue and run)
+'''
+
+
 def si(debugger, command, result, dict):
-    '''
-        si, c, r instruction override deault ones to consume their output.
-        For example:
-            si is thread step-in which by default dumps thread and frame info
-            after every step. Consuming output of this instruction allows us
-            to nicely display informations in our hook-stop
-        Same goes for c and r (continue and run)
-    '''
     res = lldb.SBCommandReturnObject()
-    lldb.debugger.GetCommandInterpreter().HandleCommand("thread step-inst", res)
+    lldb.debugger.GetCommandInterpreter().HandleCommand(
+        "thread step-inst",
+        res)
     return
 
 
 def c(debugger, command, result, dict):
     res = lldb.SBCommandReturnObject()
-    lldb.debugger.GetCommandInterpreter().HandleCommand("process continue", res)
+    lldb.debugger.GetCommandInterpreter().HandleCommand(
+        "process continue",
+        res)
 
 
 def r(debugger, command, result, dict):
     res = lldb.SBCommandReturnObject()
     if command[0:3] == "-c/":
         index = command.find("--")
-        command = command[index+2:]
+        command = command[index + 2:]
     #strip -c/bin/sh or -c/bin/bash -- when arguments are passed to cmd line...
-    lldb.debugger.GetCommandInterpreter().HandleCommand("process launch -- " + command, res)
+    lldb.debugger.GetCommandInterpreter().HandleCommand(
+        "process launch -- " + command,
+        res)
 
 
 def DumpInstructions(debugger, command, result, dict):
     '''
-        Handles 'u' command which displays instructions. Also handles output of
-        'disassemble' command ...
+        Dump instructions at certain address, also handles output of
+        'disassemble' command.
+
+        Example:
+            u 0x100000f10
     '''
     global GlobalListOutput
+    global arm_type
     GlobalListOutput = []
+
+    if is_arm():
+        cpsr = int(get_register("cpsr"), 16)
+        t = (cpsr >> 5) & 1
+        if t:
+                #it's thumb
+                arm_type = "thumbv7-apple-ios"
+        else:
+                arm_type = "armv7-apple-ios"
 
     res = lldb.SBCommandReturnObject()
     cmd = command.split()
-    handleCmd = lldb.debugger.GetCommandInterpreter().HandleCommand
     if len(cmd) == 0 or len(cmd) > 2:
-        handleCmd("disassemble --start-address=$pc --count=8", res)
+        if is_arm():
+            lldb.debugger.GetCommandInterpreter().HandleCommand(
+                "disassemble -A " + arm_type + " --start-address=$pc -c 8",
+                res)
+        else:
+            lldb.debugger.GetCommandInterpreter().HandleCommand(
+                "disassemble --start-address=$pc --count=8",
+                res)
     elif len(cmd) == 1:
-        handleCmd("disassemble --start-address=%s --count=8" % cmd[0], res)
+        if is_arm():
+            lldb.debugger.GetCommandInterpreter().HandleCommand(
+                "disassemble -A " + arm_type + " --start-address=" + cmd[0] + " --count=8",
+                res)
+        else:
+            lldb.debugger.GetCommandInterpreter().HandleCommand(
+                "disassemble --start-address=" + cmd[0] + " --count=8",
+                res)
     else:
-        handleCmd("disassemble --start-address=%s --count=%s" % (cmd[0], cmd[1]), res)
+        if is_arm():
+            lldb.debugger.GetCommandInterpreter().HandleCommand(
+                "disassemble -A " + arm_type + " --start-address=" + cmd[0] + " --count=" + cmd[1],
+                res)
+            lldb.debugger.GetCommandInterpreter().HandleCommand(
+                "disassemble --start-address=" + cmd[0] + " --count=" + cmd[1],
+                res)
 
     if res.Succeeded() is True:
         output(res.GetOutput())
@@ -1125,46 +1247,122 @@ def DumpInstructions(debugger, command, result, dict):
     result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
 
 
+'''
+    Implements stepover instruction. Unfortunatelly here is no internal
+    breakpoint exposed to Python thus all breaks have to be visible.
+    Internal breakpoints are breakpoints which are < 0 (eg. -1 etc...)
+    and their existance is visible from :
+    lldb/sources/Target/Target.cpp
+
+    BreakpointSP
+    Target::CreateBreakpoint (const FileSpecList *containingModules,
+                              const FileSpec &file,
+                              uint32_t line_no,
+                              LazyBool check_inlines,
+                              LazyBool skip_prologue,
+                              bool internal,
+                              bool hardware)
+'''
+
+
 def stepo(debugger, command, result, dict):
     '''
-        Implements stepover instruction. Unfortunatelly here is no internal breakpoint exposed to Python
-        thus all breaks have to be visible. Internal breakpoints are breakpoints which are < 0 (eg. -1 etc...)
-        and their existance is visible from :
-        lldb/sources/Target/Target.cpp
+        step over some instructions (call/movs/stos/cmps/loop)
 
-        BreakpointSP
-        Target::CreateBreakpoint (const FileSpecList *containingModules,
-                                  const FileSpec &file,
-                                  uint32_t line_no,
-                                  LazyBool check_inlines,
-                                  LazyBool skip_prologue,
-                                  bool internal,
-                                  bool hardware)
-
+        Example:    setpo
     '''
     global GlobalListOutput
+    global arm_type
     GlobalListOutput = []
 
     target = lldb.debugger.GetSelectedTarget()
-    if is_i386():
-            pc = lldb.SBAddress(int(get_register("eip"), 16), target)
-    elif is_x64():
-            pc = lldb.SBAddress(int(get_register("rip"), 16), target)
+    #if is_i386():
+    #   pc = lldb.SBAddress(int(get_register("eip"), 16), target)
+    #elif is_x64():
+    #   pc = lldb.SBAddress(int(get_register("rip"), 16), target)
+    #elif is_arm():
+    #   pc = lldb.SBAddress(int(get_register("pc"), 16), target)
 
-    inst = lldb.SBTarget.ReadInstructions(target, pc, 2, "intel")
+    if is_arm():
+        cpsr = int(get_register("cpsr"), 16)
+        t = (cpsr >> 5) & 1
+        if t:
+            #it's thumb
+            arm_type = "thumbv7-apple-ios"
+        else:
+            arm_type = "armv7-apple-ios"
 
-    pc_inst = inst[0]
-    pc_inst = str(pc_inst).split()[1]
+    res = lldb.SBCommandReturnObject()
+    if is_arm():
+        lldb.debugger.GetCommandInterpreter().HandleCommand(
+            "disassemble -A " + arm_type + " --start-address=$pc --count=2",
+            res)
+    else:
+        lldb.debugger.GetCommandInterpreter().HandleCommand(
+            "disassemble --start-address=$pc --count=2",
+            res)
 
-    pc_inst = inst[0].GetMnemonic(target)
-    if is_i386():
-        pc = int(get_register("eip"), 16) + inst[0].GetByteSize()
-    elif is_x64():
-        pc = int(get_register("rip"), 16) + inst[0].GetByteSize()
+    if res.Succeeded() is not True:
+        output("[X] Error in stepo... can't disassemble at pc")
+        return
+
+    stuff = res.GetOutput()
+    stuff = stuff.splitlines(True)
+    # dprint(stuff)
+    stuff_new = []
+    for x in stuff:
+        if x[0:3] == "-> ":
+            stuff_new.append(x)
+        if x[0:3] == "   ":
+            stuff_new.append(x)
+    #while stuff[0][0:2] != "->":
+    #   stuff = stuff[1:]
+    stuff = stuff_new
+    #Split to 2 lines separator :
+    #and than separate with " " space to get mnemonic
+    #0xxxxxxxxx:  ldr    r3, [pc, #112]            ; _dyld_start + 132
+    #0xxxxxxxxx:  sub    r0, pc, #0x8
+    current_pc = stuff[0]
+    current_pc = current_pc[2:]
+    next_pc = stuff[1]
+    current_pc = current_pc.split()[0]
+    next_pc = next_pc.split()[0]
+    current_pc = current_pc[:-1]
+    next_pc = next_pc[:-1]
+    current_pc = int(current_pc, 16)
+    next_pc = int(next_pc, 16)
+
+    current_inst = stuff[0]
+    current_inst = current_inst[2:]
+    current_inst = current_inst.split(":")[1]
+    current_inst = current_inst.split()[0]
+    #dprint(current_inst)
+
+    #dprint(current_pc)
+    #dprint(next_pc)
+    pc_inst = current_inst
+    #inst = lldb.SBTarget.ReadInstructions(target, pc, 2 , "intel")
+
+    #pc_inst = inst[0]
+    #pc_inst = str(pc_inst).split()[1]
+
+    #pc_inst = inst[0].GetMnemonic(target)
+    #if is_i386():
+    #   pc = int(get_register("eip"), 16) + inst[0].GetByteSize()
+    #elif is_x64():
+    #   pc = int(get_register("rip"), 16) + inst[0].GetByteSize()
+    #elif is_arm():
+    #   pc = int(get_register("pc"), 16) + inst[0].GetByteSize()
+
+    if is_arm():
+        if "blx" in pc_inst or "bl" in pc_inst:
+            breakpoint = target.BreakpointCreateByAddress(next_pc)
+            breakpoint.SetOneShot(True)
+            debugger.HandleCommand("c")
+            return
 
     if "call" in pc_inst or "movs" in pc_inst or "stos" in pc_inst or "loop" in pc_inst or "cmps" in pc_inst:
-
-        breakpoint = target.BreakpointCreateByAddress(pc)
+        breakpoint = target.BreakpointCreateByAddress(next_pc)
         breakpoint.SetOneShot(True)
         debugger.HandleCommand("c")
     else:
@@ -1177,7 +1375,7 @@ def hexdump(addr, chars, sep, width):
         line = chars[:width]
         chars = chars[width:]
         line = line.ljust(width, '\000')
-    if is_i386() or is_arm32():
+    if is_i386() or is_arm():
         szaddr = "0x%.08X" % addr
     elif is_x64():
         szaddr = "0x%.016lX" % addr
@@ -1190,10 +1388,18 @@ def quotechars(chars):
     return ''.join(['.', c][c.isalnum()] for c in chars)
 
 
+'''
+    Output nice hexdump... Should be db (in the future) so we can give dw/dd/dq
+    outputs as it's done with any normal debugger...
+'''
+
+
 def dd(debugger, command, result, dict):
     '''
-        Output nice hexdump... Should be db (in the future) so we can give dw/dd/dq
-        outputs as it's done with any normal debugger...
+        dump hex data at certain address.
+
+        Example:
+            dd 0x100000ef0
     '''
     global GlobalListOutput
 
@@ -1201,31 +1407,37 @@ def dd(debugger, command, result, dict):
 
     value = get_frame().EvaluateExpression(command)
     if value.IsValid() is False:
-            output("Error evaluating expression : " + command)
-            result.PutCString("".join(GlobalListOutput))
-            return
+        output("Error evaluating expression : " + command)
+        result.PutCString("".join(GlobalListOutput))
+        return
     try:
-            value = int(value.GetValue(), 10)
+        value = int(value.GetValue(), 10)
     except:
-            output("Error evaluating expression : " + command)
-            result.PutCString("".join(GlobalListOutput))
-            return
+        output("Error evaluating expression value: " + command)
+        result.PutCString("".join(GlobalListOutput))
+        return
 
     err = lldb.SBError()
     target = lldb.debugger.GetSelectedTarget()
-    membuff = target.GetProcess().ReadMemory(value, 0x100, err)
-    if err.Success() is False:
+    size = 0x100
+    while size != 0:
+        membuff = target.GetProcess().ReadMemory(value, size, err)
+        if err.Success() is False and size == 0:
             output(str(err))
             result.PutCString("".join(GlobalListOutput))
             return
+        if err.Success() is True:
+            break
+        size = size - 1
 
+    membuff = membuff + "\x00" * (0x100 - size)
     color(BLUE)
-    if is_i386():
-            output("[0x0000:0x%.08X]" % value)
-            output("------------------------------------------------------")
+    if is_i386() or is_arm():
+        output("[0x0000:0x%.08X]" % value)
+        output("------------------------------------------------------")
     elif is_x64():
-            output("[0x0000:0x%.016lX]" % value)
-            output("------------------------------------------------------")
+        output("[0x0000:0x%.016lX]" % value)
+        output("------------------------------------------------------")
     color_bold()
     output("[data]")
     color_reset()
@@ -1234,13 +1446,13 @@ def dd(debugger, command, result, dict):
     index = 0
     while index < 0x100:
         data = struct.unpack("B" * 16, membuff[index:index + 0x10])
-        if is_i386() or is_arm32():
-                szaddr = "0x%.08X" % value
+        if is_i386() or is_arm():
+            szaddr = "0x%.08X" % value
         elif is_x64():
-                szaddr = "0x%.016lX" % value
-    fmtnice = "%.02X %.02X %.02X %.02X %.02X %.02X %.02X %.02X"
-    fmtnice = fmtnice + " - " + fmtnice
-    output("\033[1m%s :\033[0m %.02X %.02X %.02X %.02X %.02X %.02X %.02X %.02X - %.02X %.02X %.02X %.02X %.02X %.02X %.02X %.02X \033[1m%s\033[0m" % (
+            szaddr = "0x%.016lX" % value
+        fmtnice = "%.02X %.02X %.02X %.02X %.02X %.02X %.02X %.02X"
+        fmtnice = fmtnice + " - " + fmtnice
+        output("\033[1m %s:\033[0m %.02X %.02X %.02X %.02X %.02X %.02X %.02X %.02X - %.02X %.02X %.02X %.02X %.02X %.02X %.02X %.02X \033[1m%s\033[0m" % (
             szaddr,
             data[0],
             data[1],
@@ -1258,11 +1470,11 @@ def dd(debugger, command, result, dict):
             data[13],
             data[14],
             data[15],
-            quotechars(membuff[index:index+0x10])))
-    if index + 0x10 != 0x100:
-        output("\n")
-    index += 0x10
-    value += 0x10
+            quotechars(membuff[index:index + 0x10])))
+        if index + 0x10 != 0x100:
+            output("\n")
+        index += 0x10
+        value += 0x10
     color_reset()
     #last element of the list has all data output...
     #so we remove last \n
@@ -1271,6 +1483,9 @@ def dd(debugger, command, result, dict):
 
 
 def dq(debugger, command, result, dict):
+    '''
+        dump data as qword
+    '''
     global GlobalListOutput
 
     GlobalListOutput = []
@@ -1289,19 +1504,29 @@ def dq(debugger, command, result, dict):
 
     err = lldb.SBError()
     target = lldb.debugger.GetSelectedTarget()
-    membuff = target.GetProcess().ReadMemory(value, 0x100, err)
+    size = 0x100
+    while size != 0:
+        membuff = target.GetProcess().ReadMemory(value, size, err)
+        if err.Success() is False and size == 0:
+            output(str(err))
+            result.PutCString("".join(GlobalListOutput))
+            return
+        if err.Success() is True:
+            break
+        size = size - 8
+        membuff = membuff + "\x00" * (0x100 - size)
     if err.Success() is False:
         output(str(err))
         result.PutCString("".join(GlobalListOutput))
         return
 
     color(BLUE)
-    if is_i386():
-            output("[0x0000:0x%.08X]" % value)
-            output("-------------------------------------------------------")
+    if is_i386() or is_arm():
+        output("[0x0000:0x%.08X]" % value)
+        output("-------------------------------------------------------")
     elif is_x64():
-            output("[0x0000:0x%.016lX]" % value)
-            output("-------------------------------------------------------")
+        output("[0x0000:0x%.016lX]" % value)
+        output("-------------------------------------------------------")
     color_bold()
     output("[data]")
     color_reset()
@@ -1309,7 +1534,7 @@ def dq(debugger, command, result, dict):
     index = 0
     while index < 0x100:
         (mem0, mem1, mem2, mem3) = struct.unpack("QQQQ", membuff[index:index + 0x20])
-        if is_i386():
+        if is_i386() or is_arm():
             szaddr = "0x%.08X" % value
         elif is_x64():
             szaddr = "0x%.016lX" % value
@@ -1324,6 +1549,12 @@ def dq(debugger, command, result, dict):
 
 
 def ddword(debugger, command, result, dict):
+    '''
+        dump data as dword
+
+        Example:
+            ddword 0x100000ef0
+    '''
     global GlobalListOutput
 
     GlobalListOutput = []
@@ -1342,14 +1573,19 @@ def ddword(debugger, command, result, dict):
 
     err = lldb.SBError()
     target = lldb.debugger.GetSelectedTarget()
-    membuff = target.GetProcess().ReadMemory(value, 0x100, err)
-    if err.Success() is False:
-        output(str(err))
-        result.PutCString("".join(GlobalListOutput))
-        return
-
+    size = 0x100
+    while size != 0:
+        membuff = target.GetProcess().ReadMemory(value, size, err)
+        if err.Success() is False and size == 0:
+            output(str(err))
+            result.PutCString("".join(GlobalListOutput))
+            return
+        if err.Success() is True:
+            break
+        size = size - 4
+    membuff = membuff + "\x00" * (0x100 - size)
     color(BLUE)
-    if is_i386():
+    if is_i386() or is_arm():
             output("[0x0000:0x%.08X]" % value)
             output("----------------------------------------")
     elif is_x64():
@@ -1362,18 +1598,19 @@ def ddword(debugger, command, result, dict):
     index = 0
     while index < 0x100:
         (mem0, mem1, mem2, mem3) = struct.unpack("IIII", membuff[index:index + 0x10])
-        if is_i386() or is_arm32():
+        if is_i386() or is_arm():
             szaddr = "0x%.08X" % value
         elif is_x64():
             szaddr = "0x%.016lX" % value
-        output("\033[1m%s :\033[0m %.08X %.08X %.08X %.08X \033[1m%s\033[0m" % (szaddr,
-                                    mem0,
-                                    mem1,
-                                    mem2,
-                                    mem3,
-                                    quotechars(membuff[index:index + 0x10])))
+        output("\033[1m%s :\033[0m %.08X %.08X %.08X %.08X \033[1m%s\033[0m" % (
+            szaddr,
+            mem0,
+            mem1,
+            mem2,
+            mem3,
+            quotechars(membuff[index:index + 0x10])))
         if index + 0x10 != 0x100:
-                output("\n")
+            output("\n")
         index += 0x10
         value += 0x10
     color_reset()
@@ -1382,6 +1619,9 @@ def ddword(debugger, command, result, dict):
 
 
 def dw(debugger, command, result, dict):
+    '''
+        dump data as word
+    '''
     global GlobalListOutput
 
     GlobalListOutput = []
@@ -1400,19 +1640,25 @@ def dw(debugger, command, result, dict):
 
     err = lldb.SBError()
     target = lldb.debugger.GetSelectedTarget()
-    membuff = target.GetProcess().ReadMemory(value, 0x100, err)
-    if err.Success() is False:
-        output(str(err))
-        result.PutCString("".join(GlobalListOutput))
-        return
+    size = 0x100
+    while size != 0:
+        membuff = target.GetProcess().ReadMemory(value, size, err)
+        if err.Success() is False and size == 0:
+            output(str(err))
+            result.PutCString("".join(GlobalListOutput))
+            return
+        if err.Success() is True:
+            break
+        size = size - 2
+    membuff = membuff + "\x00" * (0x100 - size)
 
     color(BLUE)
-    if is_i386():
-            output("[0x0000:0x%.08X]" % value)
-            output("--------------------------------------------")
+    if is_i386() or is_arm():
+        output("[0x0000:0x%.08X]" % value)
+        output("--------------------------------------------")
     elif is_x64():
-            output("[0x0000:0x%.016lX]" % value)
-            output("--------------------------------------------")
+        output("[0x0000:0x%.016lX]" % value)
+        output("--------------------------------------------")
     color_bold()
     output("[data]")
     color_reset()
@@ -1420,24 +1666,63 @@ def dw(debugger, command, result, dict):
     index = 0
     while index < 0x100:
         data = struct.unpack("HHHHHHHH", membuff[index:index + 0x10])
-        if is_i386() or is_arm32():
+        if is_i386() or is_arm():
             szaddr = "0x%.08X" % value
         elif is_x64():
             szaddr = "0x%.016lX" % value
-        output("\033[1m%s :\033[0m %.04X %.04X %.04X %.04X %.04X %.04X %.04X %.04X \033[1m%s\033[0m" % (szaddr,
-                data[0],
-                data[1],
-                data[2],
-                data[3],
-                data[4],
-                data[5],
-                data[6],
-                data[7],
-                quotechars(membuff[index:index + 0x10])))
+        output("\033[1m %s:\033[0m %.04X %.04X %.04X %.04X %.04X %.04X %.04X %.04X \033[1m%s\033[0m" % (
+            szaddr,
+            data[0],
+            data[1],
+            data[2],
+            data[3],
+            data[4],
+            data[5],
+            data[6],
+            data[7],
+            quotechars(membuff[index:index + 0x10])))
         if index + 0x10 != 0x100:
-                output("\n")
+            output("\n")
         index += 0x10
         value += 0x10
     color_reset()
+    result.PutCString("".join(GlobalListOutput))
+    result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
+
+
+def IphoneConnect(debugger, command, result, dict):
+    '''
+        Connect to iDevice.
+
+        Example:
+            iphone 192.168.0.2:5555
+    '''
+    global GlobalListOutput
+    GlobalListOutput = []
+
+    if len(command) == 0 or ":" not in command:
+        output("Connect to remote iPhone debug server")
+        output("\n")
+        output("iphone <ipaddress:port>")
+        output("\n")
+        output("iphone 192.168.0.2:5555")
+        result.PutCString("".join(GlobalListOutput))
+        result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
+        return
+
+    res = lldb.SBCommandReturnObject()
+    lldb.debugger.GetCommandInterpreter().HandleCommand("platform select remote-ios", res)
+    if res.Succeeded() is True:
+        output(res.GetOutput())
+    else:
+        output("Error running platform select remote-ios")
+        result.PutCString("".join(GlobalListOutput))
+        result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
+        return
+    lldb.debugger.GetCommandInterpreter().HandleCommand("process connect connect://" + command, res)
+    if res.Succeeded() is True:
+        output("Connected to iphone at : " + command)
+    else:
+        output(res.GetOutput())
     result.PutCString("".join(GlobalListOutput))
     result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
