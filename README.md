@@ -4,7 +4,12 @@ Similar implementation of .gdbinit from fG! for lldb in python. Based on lldbini
 
 [中文说明](https://github.com/ipfans/lldbinit-arm/blob/master/README.SC.md)
 
-![lldbinit-arm](http://ww2.sinaimg.cn/large/69e37fdbgw1efu4mcssfej20ze0d50w9.jpg)
+x86_64:
+
+![lldbinit-arm x86_64](http://ww2.sinaimg.cn/large/69e37fdbgw1efu4mcssfej20ze0d50w9.jpg)
+
+ARM:
+![lldbinit-arm arm](http://ww4.sinaimg.cn/large/69e37fdbgw1efu7wuaga4j20pr0kjtfm.jpg)
 
 Install
 ---
