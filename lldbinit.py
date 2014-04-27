@@ -112,7 +112,7 @@ GlobalListOutput = []
 hook_stop_added = 0
 
 # For debug
-Isdprint = True
+Isdprint = False
 
 
 def dprint(msg):
