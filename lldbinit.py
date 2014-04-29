@@ -133,6 +133,54 @@ def wait_for_hook_stop():
         time.sleep(0.05)
 
 
+def smartbr(debugger, command, result, dict):
+    '''
+    Quick breakpoint without ASLR calculator
+    '''
+    global GlobalListOutput
+    GlobalListOutput = []
+    addr = 0
+    if len(command) == 0 or "0x" not in command:
+        output("Pls set a address. like 0x1000")
+    elif not is_arm():
+        output("Only work in ARM mode.")
+    else:
+        offset = int(command, 0)
+        base_addr = 0
+        res = lldb.SBCommandReturnObject()
+        handleCmd = lldb.debugger.GetCommandInterpreter().HandleCommand
+        # sorry for this
+        handleCmd("image list -o -f", res)
+        balabala = res.GetOutput()
+        start = balabala.find("0] ") + 3
+        end = start + balabala[start:].find(" ")
+        base_addr = int(balabala[start:end], 0)
+        addr = base_addr + offset
+        cmd = "br s -a 0x%08x" % addr
+        handleCmd(cmd, res)
+        if res.Succeeded() is True:
+            output("Breakpoint at : 0x%08x" % addr)
+        else:
+            output(res.GetOutput())
+    result.PutCString("".join(GlobalListOutput))
+    result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
+
+
+def info(debugger, command, result, dict):
+    '''
+    Output shared info like gdb.
+    '''
+    global GlobalListOutput
+    GlobalListOutput = []
+
+    res = lldb.SBCommandReturnObject()
+    handleCmd = lldb.debugger.GetCommandInterpreter().HandleCommand
+    handleCmd("image list -o -f", res)
+    output(res.GetOutput())
+    result.PutCString("".join(GlobalListOutput))
+    result.SetStatus(lldb.eReturnStatusSuccessFinishResult)
+
+
 def __lldb_init_module(debugger, internal_dict):
     '''
         we can execute commands using debugger.HandleCommand which makes all
@@ -166,6 +214,8 @@ def __lldb_init_module(debugger, internal_dict):
     handleCmd("command script add -f lldbinit.c c", res)
     handleCmd("command script add -f lldbinit.r r", res)
     handleCmd("command script add -f lldbinit.r run", res)
+    handleCmd("command script add -f lldbinit.smartbr sbr", res)
+    handleCmd("command script add -f lldbinit.info info", res)
     handleCmd("command script add -f lldbinit.handleHookStop ctx", res)
     handleCmd("command script add -f lldbinit.handleHookStop context", res)
     handleCmd("command script add -f lldbinit.DumpInstructions u", res)

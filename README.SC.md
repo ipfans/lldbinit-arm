@@ -37,6 +37,8 @@ command script import lldbinit
 	dq	    		- dump data as qword
 	dw	    		- dump data as word
 	iphone	    	- 连接到iPhone
+	info			- 像gdb一样显示动态库加载地址
+	sbr				- 智能根据偏移下断点，忽视ASLR。
 ```
 
 像获取单一命令帮助，请使用如下命令

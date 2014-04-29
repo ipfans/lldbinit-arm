@@ -37,7 +37,9 @@ Commands which are implemented:
 	ddword	    	- dump data as dword 
 	dq	    		- dump data as qword
 	dw	    		- dump data as word
-	iphone	    	- connect to debugserver running on iPhone 
+	iphone	    	- connect to debugserver running on iPhone
+	info			- show shared library info like gdb
+	sbr				- smart breakpoint to ignore ASLR. Need offset to set bp.
 ```
 
 If you wanna inline help, just try this:
